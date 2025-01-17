@@ -1,6 +1,6 @@
-# Time Series Data Compression Framework
+# Enhanced Time Series Data Compression Framework
 
-This library provides an extensible framework for time series data compression algorithms. It aims to reduce storage requirements while maintaining the ability to perform analytics on the compressed data.
+This library provides a comprehensive framework for time series data compression algorithms, featuring advanced capabilities for both batch and streaming data processing. It aims to reduce storage requirements while maintaining analytical capabilities and offering performance optimization features.
 
 ## Features
 
@@ -8,22 +8,63 @@ This library provides an extensible framework for time series data compression a
 - Multiple compression algorithms, both lossless and lossy
 - Easy-to-use interface for compressing and decompressing time series data
 - Support for numpy arrays
+- Parallel processing capabilities for large datasets
+- Streaming data support for real-time compression
+- Automatic algorithm selection based on data characteristics
+- Comprehensive benchmarking suite
+- Type hints and extensive documentation
 
-## Implemented Algorithms
+## Core Algorithms
 
-1. **Difference Encoding (Lossless)**: A simple compression technique that stores the differences between consecutive values instead of the actual values.
+### Lossless Algorithms
 
-2. **Piecewise Aggregate Approximation (PAA) (Lossy)**: Reduces the time series from n dimensions to w dimensions by dividing the data into w equal-sized frames and calculating the mean values for each frame.
+1. **Difference Encoding**: Stores differences between consecutive values
+2. **Run Length Encoding (RLE)**: Compresses consecutive data elements into value-count pairs
+3. **Zlib Compression**: Uses zlib library for general-purpose compression
+4. **Delta-RLE Hybrid**: Combines delta encoding with RLE for efficient compression of data with constant changes
 
-3. **Symbolic Aggregate approXimation (SAX) (Lossy)**: Extends PAA by further discretizing the PAA representation into a small alphabet of symbols, providing an even more compact representation of the time series.
+### Lossy Algorithms
 
-4. **Discrete Cosine Transform (DCT) (Lossy)**: Applies the DCT to the time series and keeps only a specified number of coefficients, effectively compressing the data by discarding high-frequency components.
+1. **Piecewise Aggregate Approximation (PAA)**: Reduces dimensions by segment averaging
+2. **Symbolic Aggregate approXimation (SAX)**: Extends PAA with symbol discretization
+3. **Discrete Cosine Transform (DCT)**: Preserves significant frequency components
+4. **Discrete Wavelet Transform (DWT)**: Uses wavelets for multi-resolution compression
+5. **PCA Compression**: Reduces dimensionality while preserving data variance
 
-5. **Run Length Encoding (RLE) (Lossless)**: Compresses data by replacing consecutive data elements with a single data value and count.
+## Advanced Features
 
-6. **Zlib Compression (Lossless)**: Uses the zlib library to compress the time series data, which is particularly effective for data with repeating patterns.
+### Parallel Processing
+```python
+# Compress large datasets in parallel
+compressed_chunks = compressor.compress_parallel(data, chunk_size=1000)
+decompressed_data = compressor.decompress_parallel(compressed_chunks)
+```
 
-7. **Discrete Wavelet Transform (DWT) (Lossy)**: Applies the DWT to the time series and compresses the data by thresholding the wavelet coefficients, effectively removing small details while preserving the overall structure of the data.
+### Streaming Data Support
+```python
+# Process streaming data
+stream_compressor = StreamingCompressionAlgorithm()
+for chunk in data_stream:
+    compressed_chunk = stream_compressor.partial_compress(chunk)
+final_compressed = stream_compressor.finalize_compression()
+```
+
+### Automatic Algorithm Selection
+```python
+# Let the framework choose the best algorithm
+best_algo = compressor.auto_select_algorithm(
+    data, 
+    algorithms,
+    priority='balanced'  # Options: 'size', 'speed', 'accuracy'
+)
+```
+
+### Benchmarking
+```python
+# Compare algorithm performance
+results = compressor.benchmark_all(data, algorithms)
+print(results)  # Shows compression ratio, MSE, processing times
+```
 
 ## Installation
 
