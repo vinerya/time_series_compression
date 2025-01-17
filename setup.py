@@ -5,13 +5,15 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="time_series_compression",
-    version="0.5.0",
+    version="1.0.0",
     packages=find_packages(),
     install_requires=[
         "numpy>=1.21.0",
         "matplotlib>=3.4.2",
         "scipy>=1.7.0",
         "PyWavelets>=1.1.1",
+        "pandas>=1.3.0",
+        "scikit-learn>=0.24.2",
     ],
     author="Moudather Chelbi",
     author_email="moudather.chelbi@gmail.com",
