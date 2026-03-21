@@ -1,129 +1,159 @@
+"""Example usage of the time_series_compression library."""
+
 import numpy as np
-import matplotlib.pyplot as plt
 from time_series_compression import (
-    TimeSeriesCompressor, DifferenceEncoding, PAA, SAX, DCT,
+    TimeSeriesCompressor, CompressedResult,
+    DifferenceEncoding, PAA, SAX, DCT,
     RunLengthEncoding, ZlibCompression, DiscreteWaveletTransform,
-    DeltaRLE, PCACompression
+    DeltaRLE, StreamingDeltaRLE,
 )
 
-def generate_sample_data(size=1000):
-    """Generate sample time series data."""
-    time = np.arange(0, 10, 10/size)
-    return time, np.sin(time) + np.random.normal(0, 0.1, time.shape)
 
-def basic_compression_example():
-    """Demonstrate basic compression functionality."""
-    print("\n1. Basic Compression Example")
-    print("----------------------------")
-    
-    time, data = generate_sample_data()
+def generate_sample_data(size=1000):
+    rng = np.random.default_rng(42)
+    t = np.linspace(0, 10, size)
+    return t, np.sin(t) + rng.normal(0, 0.1, size)
+
+
+def basic_compression():
+    """Compress → serialize → deserialize → decompress."""
+    print("\n1. Basic Compression & Byte Serialization")
+    print("-" * 45)
+
+    _, data = generate_sample_data()
     compressor = TimeSeriesCompressor()
-    
+
     algorithms = [
-        ("DifferenceEncoding (Lossless)", DifferenceEncoding()),
-        ("PAA (Lossy)", PAA(segments=50)),
-        ("SAX (Lossy)", SAX(segments=50, alphabet_size=10)),
-        ("DCT (Lossy)", DCT(keep_coeffs=50)),
-        ("RunLengthEncoding (Lossless)", RunLengthEncoding()),
-        ("ZlibCompression (Lossless)", ZlibCompression()),
-        ("DiscreteWaveletTransform (Lossy)", DiscreteWaveletTransform(wavelet='db4', level=5, threshold=0.1))
+        ("DifferenceEncoding (lossless)", DifferenceEncoding()),
+        ("PAA (lossy)", PAA(segments=50)),
+        ("SAX (lossy)", SAX(segments=50, alphabet_size=10)),
+        ("DCT (lossy)", DCT(keep_coeffs=50)),
+        ("RLE (lossless)", RunLengthEncoding()),
+        ("Zlib (lossless)", ZlibCompression()),
+        ("DWT (lossy)", DiscreteWaveletTransform(wavelet='db4', level=5, threshold=0.1)),
+        ("DeltaRLE (lossless)", DeltaRLE()),
     ]
-    
+
     for name, algo in algorithms:
         compressor.set_algorithm(algo)
-        compressed = compressor.compress(data)
-        decompressed = compressor.decompress(compressed)
-        mse = np.mean((data - decompressed) ** 2)
-        print(f"\n{name}:")
-        print(f"MSE: {mse:.6f}")
+        result = compressor.compress(data)
 
-def enhanced_features_example():
-    """Demonstrate new enhanced features."""
-    print("\n2. Enhanced Features Example")
-    print("---------------------------")
-    
-    # Generate larger dataset for parallel processing demo
-    time, data = generate_sample_data(size=100000)
-    
-    # Initialize enhanced compressor
-    enhanced_compressor = TimeSeriesCompressor()
-    
-    # Define algorithms including new ones
+        # Serialize to bytes and back
+        raw_bytes = result.to_bytes()
+        restored = CompressedResult.from_bytes(raw_bytes)
+        decompressed = compressor.decompress(restored)
+
+        mse = np.mean((data - decompressed) ** 2)
+        ratio = data.nbytes / len(raw_bytes)
+        print(f"\n  {name}:")
+        print(f"    Serialized size: {len(raw_bytes):,} bytes "
+              f"(original: {data.nbytes:,} bytes)")
+        print(f"    Compression ratio: {ratio:.2f}x")
+        print(f"    MSE: {mse:.8f}")
+
+
+def auto_decompress_demo():
+    """Compress to bytes and auto-decompress without knowing the algorithm."""
+    print("\n\n2. Auto-Detect Decompression from Bytes")
+    print("-" * 45)
+
+    _, data = generate_sample_data()
+    compressor = TimeSeriesCompressor(ZlibCompression())
+
+    raw_bytes = compressor.compress_to_bytes(data)
+    print(f"  Compressed {data.nbytes:,} bytes → {len(raw_bytes):,} bytes")
+
+    # Decompress without specifying algorithm — it's encoded in the bytes
+    restored = TimeSeriesCompressor.decompress_from_bytes(raw_bytes)
+    print(f"  Decompressed back to {restored.nbytes:,} bytes")
+    print(f"  Perfect reconstruction: {np.array_equal(data, restored)}")
+
+
+def streaming_demo():
+    """Process data in chunks using streaming compression."""
+    print("\n\n3. Streaming Compression")
+    print("-" * 45)
+
+    _, data = generate_sample_data(size=10000)
+    chunk_size = 1000
+
+    algo = StreamingDeltaRLE(tolerance=1e-6)
+    for i in range(0, len(data), chunk_size):
+        chunk = data[i:i + chunk_size]
+        partial = algo.partial_compress(chunk)
+        if partial:
+            print(f"  Chunk {i // chunk_size + 1}: flushed {len(partial)} bytes")
+
+    result = algo.finalize_compression()
+    print(f"\n  Total compressed: {len(result.to_bytes()):,} bytes "
+          f"(original: {data.nbytes:,} bytes)")
+
+    decompressed = algo.decompress(result)
+    mse = np.mean((data - decompressed) ** 2)
+    print(f"  MSE: {mse:.10f}")
+
+
+def benchmarking_demo():
+    """Benchmark and auto-select the best algorithm."""
+    print("\n\n4. Benchmarking & Auto-Selection")
+    print("-" * 45)
+
+    _, data = generate_sample_data(size=10000)
+    compressor = TimeSeriesCompressor()
+
     algorithms = [
-        DeltaRLE(tolerance=1e-6),
-        PCACompression(n_components=0.95),
+        DeltaRLE(),
         DifferenceEncoding(),
-        PAA(segments=100)
+        PAA(segments=100),
+        DCT(keep_coeffs=100),
+        ZlibCompression(),
     ]
-    
-    print("\nA. Automatic Algorithm Selection")
-    print("--------------------------------")
-    # Try different priorities
+
+    results = compressor.benchmark_all(data, algorithms)
+    print("\n  Benchmark Results:")
+    print(results.to_string(index=False))
+
     for priority in ['size', 'speed', 'accuracy', 'balanced']:
-        best_algo = enhanced_compressor.auto_select_algorithm(data, algorithms, priority=priority)
-        print(f"Best algorithm for {priority} priority: {best_algo.__class__.__name__}")
-    
-    print("\nB. Parallel Processing")
-    print("---------------------")
-    # Compare parallel vs sequential processing
-    import time
-    
-    # Sequential processing
-    start_time = time.time()
-    enhanced_compressor.set_algorithm(DeltaRLE())
-    compressed = enhanced_compressor.compress(data)
-    seq_time = time.time() - start_time
-    
-    # Parallel processing
-    start_time = time.time()
-    compressed_chunks = enhanced_compressor.compress_parallel(data, chunk_size=1000)
-    par_time = time.time() - start_time
-    
-    print(f"Sequential processing time: {seq_time:.3f}s")
-    print(f"Parallel processing time: {par_time:.3f}s")
-    print(f"Speedup: {seq_time/par_time:.2f}x")
-    
-    print("\nC. Benchmarking")
-    print("--------------")
-    results = enhanced_compressor.benchmark_all(data[:10000], algorithms)
-    print("\nBenchmark Results:")
-    print(results)
+        best = compressor.auto_select_algorithm(data, algorithms, priority=priority)
+        print(f"\n  Best for {priority}: {best!r}")
+
 
 def plot_comparison():
-    """Create comparison plots of different algorithms."""
-    print("\n3. Plotting Comparison")
-    print("---------------------")
-    
-    time, data = generate_sample_data()
-    enhanced_compressor = TimeSeriesCompressor()
-    
+    """Visual comparison (requires matplotlib)."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("\n\n5. Skipping plot (install matplotlib: pip install matplotlib)")
+        return
+
+    print("\n\n5. Plotting Comparison")
+    print("-" * 45)
+
+    t, data = generate_sample_data()
+    compressor = TimeSeriesCompressor()
+
     plt.figure(figsize=(15, 10))
-    plt.plot(time, data, label='Original Data', alpha=0.5)
-    
-    algorithms = [
-        DeltaRLE(tolerance=1e-6),
-        PCACompression(n_components=0.95),
-        PAA(segments=50),
-        DCT(keep_coeffs=50)
-    ]
-    
-    for algo in algorithms:
-        enhanced_compressor.set_algorithm(algo)
-        decompressed = enhanced_compressor.decompress(enhanced_compressor.compress(data))
-        plt.plot(time[:len(decompressed)], decompressed, 
-                label=f'Decompressed ({algo.__class__.__name__})',
-                alpha=0.7)
-    
+    plt.plot(t, data, label='Original', alpha=0.5)
+
+    for algo in [DeltaRLE(), PAA(segments=50), DCT(keep_coeffs=50)]:
+        compressor.set_algorithm(algo)
+        result = compressor.compress(data)
+        decompressed = compressor.decompress(result)
+        plt.plot(t[:len(decompressed)], decompressed,
+                 label=repr(algo), alpha=0.7)
+
     plt.legend()
-    plt.title('Comparison of Compression Algorithms')
+    plt.title('Compression Algorithm Comparison')
     plt.xlabel('Time')
     plt.ylabel('Value')
-    plt.savefig('enhanced_compression_comparison.png')
+    plt.savefig('compression_comparison.png')
     plt.close()
-    
-    print("Plot saved as 'enhanced_compression_comparison.png'")
+    print("  Saved: compression_comparison.png")
+
 
 if __name__ == "__main__":
-    basic_compression_example()
-    enhanced_features_example()
+    basic_compression()
+    auto_decompress_demo()
+    streaming_demo()
+    benchmarking_demo()
     plot_comparison()
