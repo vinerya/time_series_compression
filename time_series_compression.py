@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+import sys
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
+from typing import Optional, Union, List
 from scipy.stats import norm
 from scipy.fft import dct, idct
 from sklearn.preprocessing import StandardScaler
@@ -24,7 +26,7 @@ class DifferenceEncoding(CompressionAlgorithm):
     def compress(self, data):
         if not isinstance(data, np.ndarray):
             raise TypeError("Input data must be a numpy array")
-        
+
         compressed = np.zeros_like(data)
         compressed[0] = data[0]
         compressed[1:] = np.diff(data)
@@ -33,30 +35,45 @@ class DifferenceEncoding(CompressionAlgorithm):
     def decompress(self, compressed_data):
         if not isinstance(compressed_data, np.ndarray):
             raise TypeError("Input data must be a numpy array")
-        
+
         return np.cumsum(compressed_data)
+
+    def __repr__(self):
+        return "DifferenceEncoding()"
 
 class PAA(CompressionAlgorithm):
     def __init__(self, segments):
+        if segments <= 0:
+            raise ValueError("segments must be a positive integer")
         self.segments = segments
 
     def compress(self, data):
         if not isinstance(data, np.ndarray):
             raise TypeError("Input data must be a numpy array")
-        
+
         self.original_length = len(data)
-        segment_len = len(data) // self.segments
-        compressed = np.mean(data[:len(data) - len(data) % segment_len].reshape(-1, segment_len), axis=1)
+        # Use array_split to handle non-divisible lengths without data loss
+        chunks = np.array_split(data, self.segments)
+        compressed = np.array([chunk.mean() for chunk in chunks])
         return compressed
 
     def decompress(self, compressed_data):
         if not isinstance(compressed_data, np.ndarray):
             raise TypeError("Input data must be a numpy array")
-        
-        return np.repeat(compressed_data, self.original_length // self.segments)
+
+        # Reconstruct with exact original length using same split logic
+        chunk_sizes = [len(c) for c in np.array_split(np.empty(self.original_length), self.segments)]
+        return np.repeat(compressed_data, chunk_sizes)
+
+    def __repr__(self):
+        return f"PAA(segments={self.segments})"
 
 class SAX(CompressionAlgorithm):
     def __init__(self, segments, alphabet_size):
+        if segments <= 0:
+            raise ValueError("segments must be a positive integer")
+        if alphabet_size <= 1:
+            raise ValueError("alphabet_size must be greater than 1")
         self.segments = segments
         self.alphabet_size = alphabet_size
         self.breakpoints = norm.ppf(np.linspace(0, 1, alphabet_size + 1)[1:-1])
@@ -95,8 +112,13 @@ class SAX(CompressionAlgorithm):
         # Denormalize
         return decompressed * self.original_std + self.original_mean
 
+    def __repr__(self):
+        return f"SAX(segments={self.segments}, alphabet_size={self.alphabet_size})"
+
 class DCT(CompressionAlgorithm):
     def __init__(self, keep_coeffs):
+        if keep_coeffs <= 0:
+            raise ValueError("keep_coeffs must be a positive integer")
         self.keep_coeffs = keep_coeffs
 
     def compress(self, data):
@@ -115,6 +137,9 @@ class DCT(CompressionAlgorithm):
         full_coeffs = np.zeros(self.original_shape)
         full_coeffs[:len(compressed_data)] = compressed_data
         return idct(full_coeffs, n=self.original_shape[0])
+
+    def __repr__(self):
+        return f"DCT(keep_coeffs={self.keep_coeffs})"
 
 class RunLengthEncoding(CompressionAlgorithm):
     def compress(self, data):
@@ -139,17 +164,24 @@ class RunLengthEncoding(CompressionAlgorithm):
             decompressed.extend([value] * count)
         return np.array(decompressed).reshape(self.original_shape)
 
+    def __repr__(self):
+        return "RunLengthEncoding()"
+
 class ZlibCompression(CompressionAlgorithm):
     def compress(self, data):
         if not isinstance(data, np.ndarray):
             raise TypeError("Input data must be a numpy array")
-        
+
         self.original_shape = data.shape
+        self.original_dtype = data.dtype
         return zlib.compress(data.tobytes())
 
     def decompress(self, compressed_data):
         decompressed = zlib.decompress(compressed_data)
-        return np.frombuffer(decompressed, dtype=np.float64).reshape(self.original_shape)
+        return np.frombuffer(decompressed, dtype=self.original_dtype).reshape(self.original_shape)
+
+    def __repr__(self):
+        return "ZlibCompression()"
 
 class DiscreteWaveletTransform(CompressionAlgorithm):
     def __init__(self, wavelet='db4', level=None, threshold=0.1):
@@ -175,6 +207,9 @@ class DiscreteWaveletTransform(CompressionAlgorithm):
             raise TypeError("Input data must be a list of wavelet coefficients")
         
         return pywt.waverec(compressed_data, self.wavelet)[:self.original_shape[0]]
+
+    def __repr__(self):
+        return f"DiscreteWaveletTransform(wavelet='{self.wavelet}', level={self.level}, threshold={self.threshold})"
 
 class StreamingCompressionAlgorithm(CompressionAlgorithm, ABC):
     """Base class for streaming compression algorithms."""
@@ -210,7 +245,7 @@ class DeltaRLE(CompressionAlgorithm):
         # Calculate deltas
         deltas = np.diff(data)
         if len(deltas) == 0:
-            return [(data[0], 1, 0.0)]
+            return [(data[0], 0, 0.0)]
             
         current_delta = deltas[0]
         count = 1
@@ -229,14 +264,21 @@ class DeltaRLE(CompressionAlgorithm):
         compressed.append((start_val, count, current_delta))
         return compressed
 
+    def __repr__(self):
+        return f"DeltaRLE(tolerance={self.tolerance})"
+
     def decompress(self, compressed_data: list) -> np.ndarray:
         decompressed = []
-        
-        for start_val, count, delta in compressed_data:
+
+        for idx, (start_val, count, delta) in enumerate(compressed_data):
             values = [start_val + i * delta for i in range(count + 1)]
-            decompressed.extend(values)
-            
-        return np.array(decompressed[:-len(compressed_data)+1])
+            if idx < len(compressed_data) - 1:
+                # Drop last value (shared boundary with next segment)
+                decompressed.extend(values[:-1])
+            else:
+                decompressed.extend(values)
+
+        return np.array(decompressed)
 
 class PCACompression(CompressionAlgorithm):
     """
@@ -279,14 +321,17 @@ class PCACompression(CompressionAlgorithm):
         
         return reconstructed.reshape(self.original_shape)
 
+    def __repr__(self):
+        return f"PCACompression(n_components={self.n_components})"
+
 class TimeSeriesCompressor:
     """Enhanced time series compressor with advanced features."""
     
     def __init__(self, algorithm: Optional[CompressionAlgorithm] = None):
         self.algorithm = algorithm or DifferenceEncoding()
         self.benchmark_results = pd.DataFrame(
-            columns=['Algorithm', 'Compression_Ratio', 'MSE', 
-                    'Compression_Time', 'Decompression_Time']
+            columns=['Algorithm', 'Compression_Ratio', 'MSE', 'Max_Error',
+                    'SNR_dB', 'Compression_Time', 'Decompression_Time']
         )
 
     def set_algorithm(self, algorithm: CompressionAlgorithm) -> None:
@@ -320,37 +365,50 @@ class TimeSeriesCompressor:
             
         return np.concatenate(decompressed_chunks)
 
-    def benchmark_algorithm(self, data: np.ndarray, 
+    @staticmethod
+    def _estimate_size(obj) -> int:
+        """Recursively estimate the byte size of a compressed output."""
+        if isinstance(obj, np.ndarray):
+            return obj.nbytes
+        elif isinstance(obj, bytes):
+            return len(obj)
+        elif isinstance(obj, (list, tuple)):
+            return sum(TimeSeriesCompressor._estimate_size(item) for item in obj)
+        else:
+            # Scalar or other primitive
+            return sys.getsizeof(obj)
+
+    def benchmark_algorithm(self, data: np.ndarray,
                           algorithm: CompressionAlgorithm) -> dict:
         """Benchmark a compression algorithm's performance."""
         self.set_algorithm(algorithm)
-        
+
         # Measure compression
         start_time = time.time()
         compressed = self.compress(data)
         compression_time = time.time() - start_time
-        
+
         # Measure decompression
         start_time = time.time()
         decompressed = self.decompress(compressed)
         decompression_time = time.time() - start_time
-        
+
         # Calculate metrics
-        if isinstance(compressed, list):
-            compressed_size = sum(arr.nbytes if isinstance(arr, np.ndarray) 
-                                else len(str(arr)) for arr in compressed)
-        elif isinstance(compressed, bytes):
-            compressed_size = len(compressed)
-        else:
-            compressed_size = compressed.nbytes
-            
+        compressed_size = self._estimate_size(compressed)
+
         compression_ratio = data.nbytes / compressed_size
         mse = np.mean((data - decompressed) ** 2)
-        
+        max_error = np.max(np.abs(data - decompressed))
+        # SNR in dB; guard against zero-signal edge case
+        signal_power = np.mean(data ** 2)
+        snr_db = 10 * np.log10(signal_power / mse) if mse > 0 else float('inf')
+
         return {
             'Algorithm': algorithm.__class__.__name__,
             'Compression_Ratio': compression_ratio,
             'MSE': mse,
+            'Max_Error': max_error,
+            'SNR_dB': snr_db,
             'Compression_Time': compression_time,
             'Decompression_Time': decompression_time
         }
@@ -382,12 +440,15 @@ class TimeSeriesCompressor:
             raise ValueError(f"Invalid priority: {priority}")
             
         results = self.benchmark_all(data, algorithms)
-        
-        # Normalize metrics
+
+        # Normalize metrics (guard against division by zero when all values are equal)
         normalized = results.copy()
         for col in ['Compression_Ratio', 'MSE', 'Compression_Time', 'Decompression_Time']:
-            normalized[col] = ((results[col] - results[col].min()) / 
-                             (results[col].max() - results[col].min()))
+            col_range = results[col].max() - results[col].min()
+            if col_range == 0:
+                normalized[col] = 0.0
+            else:
+                normalized[col] = (results[col] - results[col].min()) / col_range
         
         # Calculate scores based on priority
         if priority == 'size':
