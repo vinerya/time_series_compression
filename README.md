@@ -21,7 +21,6 @@ This library provides a comprehensive framework for time series data compression
 1. **Difference Encoding**: Stores differences between consecutive values
 2. **Run Length Encoding (RLE)**: Compresses consecutive data elements into value-count pairs
 3. **Zlib Compression**: Uses zlib library for general-purpose compression
-4. **Delta-RLE Hybrid**: Combines delta encoding with RLE for efficient compression of data with constant changes
 
 ### Lossy Algorithms
 
@@ -29,7 +28,12 @@ This library provides a comprehensive framework for time series data compression
 2. **Symbolic Aggregate approXimation (SAX)**: Extends PAA with symbol discretization
 3. **Discrete Cosine Transform (DCT)**: Preserves significant frequency components
 4. **Discrete Wavelet Transform (DWT)**: Uses wavelets for multi-resolution compression
-5. **PCA Compression**: Reduces dimensionality while preserving data variance
+5. **PCA Compression**: Cuts a series into windows (or takes multivariate data as-is) and keeps the principal components that explain most of the variance
+6. **Delta-RLE Hybrid**: Combines delta encoding with RLE for efficient compression of data with constant changes. Every reconstructed value stays within `tolerance` of the original (default `1e-6`); `tolerance=0` makes it lossless
+
+### Compressed Output
+
+`compress` returns everything `decompress` needs (for example, PAA returns a `(means, original_length)` tuple). Compressed data can be stored or sent to another process and decompressed by any instance created with the same parameters.
 
 ## Advanced Features
 
@@ -41,9 +45,24 @@ decompressed_data = compressor.decompress_parallel(compressed_chunks)
 ```
 
 ### Streaming Data Support
+`StreamingCompressionAlgorithm` is an abstract interface for algorithms that compress data as it arrives. No built-in algorithm implements it yet; subclass it to add one:
 ```python
-# Process streaming data
-stream_compressor = StreamingCompressionAlgorithm()
+class MyStreamingAlgorithm(StreamingCompressionAlgorithm):
+    def partial_compress(self, chunk):
+        # Compress one chunk as it arrives
+        ...
+
+    def finalize_compression(self):
+        # Flush any buffered state and return the final output
+        ...
+
+    def compress(self, data):
+        ...
+
+    def decompress(self, compressed_data):
+        ...
+
+stream_compressor = MyStreamingAlgorithm()
 for chunk in data_stream:
     compressed_chunk = stream_compressor.partial_compress(chunk)
 final_compressed = stream_compressor.finalize_compression()
@@ -70,7 +89,7 @@ print(results)  # Shows compression ratio, MSE, processing times
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/time_series_compression.git
+   git clone https://github.com/vinerya/time_series_compression.git
    ```
 
 2. Navigate to the project directory:
@@ -118,11 +137,11 @@ for name, algo in algorithms:
     compressor.set_algorithm(algo)
     compressed_data = compressor.compress(data)
     decompressed_data = compressor.decompress(compressed_data)
-    
+    mse = np.mean((data - decompressed_data) ** 2)
+
     print(f"{name}:")
-    print(f"  Original data shape: {data.shape}")
-    print(f"  Compressed data shape: {compressed_data.shape if hasattr(compressed_data, 'shape') else len(compressed_data)}")
     print(f"  Decompressed data shape: {decompressed_data.shape}")
+    print(f"  MSE: {mse:.6f}")
 ```
 
 ## Extending the Framework
@@ -151,4 +170,4 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
