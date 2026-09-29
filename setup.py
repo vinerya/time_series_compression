@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import setup
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="time_series_compression",
     version="1.0.0",
-    packages=find_packages(),
+    py_modules=["time_series_compression"],
     install_requires=[
         "numpy>=1.21.0",
         "matplotlib>=3.4.2",

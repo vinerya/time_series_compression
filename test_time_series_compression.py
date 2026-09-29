@@ -1,4 +1,6 @@
+import pickle
 import unittest
+import warnings
 import numpy as np
 import pandas as pd
 from time_series_compression import (
@@ -36,9 +38,10 @@ class TestBaseCompressor(unittest.TestCase):
         compressed_data = self.compressor.compress(self.data)
         decompressed_data = self.compressor.decompress(compressed_data)
 
-        self.assertEqual(compressed_data.shape[0], 10)
+        means, original_length = compressed_data
+        self.assertEqual(means.shape[0], 10)
+        self.assertEqual(original_length, len(self.data))
         self.assertEqual(self.data.shape, decompressed_data.shape)
-        self.assertFalse(np.array_equal(self.data, compressed_data))
         # PAA with 10 segments on 100 points is very lossy; verify MSE is reasonable
         mse = np.mean((self.data - decompressed_data) ** 2)
         self.assertLess(mse, 0.5)
@@ -48,9 +51,10 @@ class TestBaseCompressor(unittest.TestCase):
         compressed_data = self.compressor.compress(self.data)
         decompressed_data = self.compressor.decompress(compressed_data)
 
-        self.assertEqual(compressed_data.shape[0], 10)
+        symbols = compressed_data[0]
+        self.assertEqual(symbols.shape[0], 10)
+        self.assertTrue(np.all((symbols >= 0) & (symbols < 5)))
         self.assertEqual(self.data.shape, decompressed_data.shape)
-        self.assertFalse(np.array_equal(self.data, compressed_data))
         mse = np.mean((self.data - decompressed_data) ** 2)
         self.assertLess(mse, 1.0)
 
@@ -59,9 +63,8 @@ class TestBaseCompressor(unittest.TestCase):
         compressed_data = self.compressor.compress(self.data)
         decompressed_data = self.compressor.decompress(compressed_data)
 
-        self.assertEqual(compressed_data.shape[0], 10)
+        self.assertEqual(compressed_data[0].shape[0], 10)
         self.assertEqual(self.data.shape, decompressed_data.shape)
-        self.assertFalse(np.array_equal(self.data, compressed_data))
         mse = np.mean((self.data - decompressed_data) ** 2)
         self.assertLess(mse, 0.5)
 
@@ -88,7 +91,7 @@ class TestBaseCompressor(unittest.TestCase):
         compressed_data = self.compressor.compress(self.data)
         decompressed_data = self.compressor.decompress(compressed_data)
 
-        self.assertIsInstance(compressed_data, list)
+        self.assertIsInstance(compressed_data, tuple)
         self.assertEqual(self.data.shape, decompressed_data.shape)
         np.testing.assert_allclose(self.data, decompressed_data, rtol=1e-1, atol=1e-1)
 
@@ -100,14 +103,8 @@ class TestBaseCompressor(unittest.TestCase):
                           DiscreteWaveletTransform(wavelet='db4', level=3, threshold=0.1)]:
             self.compressor.set_algorithm(algorithm)
             compressed_data = self.compressor.compress(self.data)
-            
-            if isinstance(compressed_data, list):
-                compressed_size = sum(arr.nbytes if isinstance(arr, np.ndarray) else len(str(arr)) for arr in compressed_data)
-            elif isinstance(compressed_data, bytes):
-                compressed_size = len(compressed_data)
-            else:
-                compressed_size = compressed_data.nbytes
-            
+            compressed_size = TimeSeriesCompressor._estimate_size(compressed_data)
+
             ratio = original_size / compressed_size
             # RLE expands random float data (no repeated values), so use a lower threshold
             min_ratio = 0.1 if isinstance(algorithm, RunLengthEncoding) else 0.5
@@ -146,9 +143,11 @@ class TestAdvancedFeatures(unittest.TestCase):
         decompressed_data = self.compressor.decompress(compressed_data)
 
         self.assertIsInstance(compressed_data, tuple)
-        self.assertEqual(len(compressed_data), 3)  # data, components, scaler_params
+        self.assertEqual(len(compressed_data), 4)  # scores, components, mean, original_shape
         self.assertEqual(self.data.shape, decompressed_data.shape)
-        np.testing.assert_allclose(self.data, decompressed_data, rtol=1e-1, atol=1e-1)
+        # Lossy: the discarded components are mostly the added noise (std 0.1)
+        mse = np.mean((self.data - decompressed_data) ** 2)
+        self.assertLess(mse, 0.01)
 
     def test_parallel_processing(self):
         self.compressor.set_algorithm(DeltaRLE())
@@ -254,7 +253,7 @@ class TestImprovements(unittest.TestCase):
         compressed = paa.compress(data)
         decompressed = paa.decompress(compressed)
         self.assertEqual(len(decompressed), len(data))
-        self.assertEqual(compressed.shape[0], 5)
+        self.assertEqual(compressed[0].shape[0], 5)
 
     def test_paa_invalid_segments(self):
         """PAA should reject non-positive segments."""
@@ -335,6 +334,157 @@ class TestImprovements(unittest.TestCase):
         # Nested structures (tuple of arrays)
         size = TimeSeriesCompressor._estimate_size((np.zeros(5), np.zeros(3)))
         self.assertEqual(size, 5 * 8 + 3 * 8)
+
+    def test_estimate_size_scalars(self):
+        """Scalars count as their value size, not Python object overhead."""
+        self.assertEqual(TimeSeriesCompressor._estimate_size(np.float64(1.0)), 8)
+        self.assertEqual(TimeSeriesCompressor._estimate_size(np.int32(1)), 4)
+        self.assertEqual(TimeSeriesCompressor._estimate_size(100), 8)
+        self.assertEqual(TimeSeriesCompressor._estimate_size(1.5), 8)
+
+class TestSelfContainedOutput(unittest.TestCase):
+    """Compressed output must carry everything needed to decompress it."""
+
+    CONFIGS = [
+        (DifferenceEncoding, {}),
+        (PAA, dict(segments=10)),
+        (SAX, dict(segments=10, alphabet_size=5)),
+        (DCT, dict(keep_coeffs=10)),
+        (RunLengthEncoding, {}),
+        (ZlibCompression, {}),
+        (DiscreteWaveletTransform, dict(wavelet='db4', level=3, threshold=0.1)),
+        (DeltaRLE, {}),
+        (PCACompression, {}),
+    ]
+
+    def setUp(self):
+        time = np.arange(0, 10, 0.1)
+        rng = np.random.default_rng(42)
+        self.data = np.sin(time) + rng.normal(0, 0.1, time.shape)
+
+    def test_decompress_with_fresh_instance(self):
+        for cls, kwargs in self.CONFIGS:
+            with self.subTest(algorithm=cls.__name__):
+                algo = cls(**kwargs)
+                compressed = algo.compress(self.data)
+                expected = algo.decompress(compressed)
+                # Round-trip through pickle, as storage or another process would
+                restored = pickle.loads(pickle.dumps(compressed))
+                np.testing.assert_array_equal(cls(**kwargs).decompress(restored), expected)
+
+    def test_instance_reuse_keeps_earlier_output_valid(self):
+        for cls, kwargs in self.CONFIGS:
+            with self.subTest(algorithm=cls.__name__):
+                algo = cls(**kwargs)
+                compressed = algo.compress(self.data)
+                expected = algo.decompress(compressed)
+                algo.compress(np.arange(37, dtype=float))
+                np.testing.assert_array_equal(algo.decompress(compressed), expected)
+
+    def test_parallel_all_algorithms(self):
+        compressor = TimeSeriesCompressor()
+        for cls, kwargs in self.CONFIGS:
+            with self.subTest(algorithm=cls.__name__):
+                compressor.set_algorithm(cls(**kwargs))
+                chunks = compressor.compress_parallel(self.data, chunk_size=30)
+                decompressed = compressor.decompress_parallel(chunks)
+                self.assertEqual(decompressed.shape, self.data.shape)
+                self.assertLess(np.mean((self.data - decompressed) ** 2), 0.5)
+
+    def test_parallel_chunk_size_respected(self):
+        compressor = TimeSeriesCompressor(DifferenceEncoding())
+        chunks = compressor.compress_parallel(self.data, chunk_size=10)
+        self.assertEqual([len(c) for c in chunks], [10] * 10)
+        chunks = compressor.compress_parallel(self.data, chunk_size=30)
+        self.assertEqual([len(c) for c in chunks], [30, 30, 30, 10])
+        with self.assertRaises(ValueError):
+            compressor.compress_parallel(self.data, chunk_size=0)
+
+class TestAlgorithmFixes(unittest.TestCase):
+    """Regression tests for SAX decoding, DeltaRLE error bounds and PCA."""
+
+    def test_sax_symbols_decode_in_order(self):
+        """Lower symbols must decode to lower values."""
+        data = np.repeat([-3.0, 0.0, 1.0, 3.0], 4)
+        sax = SAX(segments=4, alphabet_size=4)
+        symbols = sax.compress(data)[0]
+        np.testing.assert_array_equal(symbols, [0, 1, 2, 3])
+        segment_values = sax.decompress(sax.compress(data))[::4]
+        self.assertTrue(np.all(np.diff(segment_values) > 0))
+
+    def test_sax_centroids(self):
+        """Symbols decode to the mean of the standard normal within their bin."""
+        np.testing.assert_allclose(SAX(segments=1, alphabet_size=2).centroids,
+                                   [-np.sqrt(2 / np.pi), np.sqrt(2 / np.pi)])
+        centroids = SAX(segments=1, alphabet_size=5).centroids
+        self.assertAlmostEqual(centroids.sum(), 0.0)
+        self.assertTrue(np.all(np.diff(centroids) > 0))
+
+    def test_sax_constant_data(self):
+        """Constant data must not divide by zero."""
+        data = np.full(8, 3.0)
+        sax = SAX(segments=4, alphabet_size=4)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            decompressed = sax.decompress(sax.compress(data))
+        np.testing.assert_array_equal(decompressed, data)
+
+    def test_delta_rle_error_bounded_by_tolerance(self):
+        """Small per-step jitter must not accumulate beyond the tolerance."""
+        rng = np.random.default_rng(0)
+        data = np.cumsum(1.0 + rng.uniform(-4e-7, 4e-7, 1000))
+        algo = DeltaRLE(tolerance=1e-6)
+        compressed = algo.compress(data)
+        max_error = np.max(np.abs(algo.decompress(compressed) - data))
+        self.assertLessEqual(max_error, 1e-6 + 1e-12)
+        self.assertLess(len(compressed), len(data) // 2)
+
+    def test_delta_rle_zero_tolerance_is_lossless(self):
+        rng = np.random.default_rng(0)
+        for data in [np.arange(100, dtype=float), rng.normal(size=100)]:
+            algo = DeltaRLE(tolerance=0)
+            np.testing.assert_allclose(algo.decompress(algo.compress(data)), data,
+                                       rtol=0, atol=1e-12)
+        self.assertEqual(len(DeltaRLE(tolerance=0).compress(np.arange(100, dtype=float))), 1)
+
+    def test_delta_rle_invalid_tolerance(self):
+        with self.assertRaises(ValueError):
+            DeltaRLE(tolerance=-1)
+
+    def test_pca_compresses_univariate(self):
+        """Windowed PCA must store less than the original series."""
+        rng = np.random.default_rng(0)
+        data = np.sin(np.arange(0, 100, 0.01)) + rng.normal(0, 0.1, 10000)
+        result = TimeSeriesCompressor().benchmark_algorithm(data, PCACompression())
+        self.assertGreater(result['Compression_Ratio'], 5)
+        self.assertLess(result['MSE'], 0.02)
+
+    def test_pca_multivariate(self):
+        """2-D input is reduced across features."""
+        rng = np.random.default_rng(0)
+        base = rng.normal(size=200)
+        data = np.column_stack([base, 2 * base + 1, -base])
+        algo = PCACompression(n_components=0.99)
+        compressed = algo.compress(data)
+        self.assertEqual(compressed[0].shape, (200, 1))
+        np.testing.assert_allclose(algo.decompress(compressed), data, atol=1e-10)
+
+    def test_pca_short_series(self):
+        """Series too short for PCA still round-trip."""
+        for n in [1, 2, 3]:
+            data = np.arange(n, dtype=float)
+            algo = PCACompression()
+            np.testing.assert_allclose(algo.decompress(algo.compress(data)), data, atol=1e-10)
+
+    def test_pca_int_components_clamped(self):
+        """An integer n_components larger than the matrix is clamped."""
+        data = np.sin(np.arange(0, 10, 0.1))
+        algo = PCACompression(n_components=50, window_size=10)
+        np.testing.assert_allclose(algo.decompress(algo.compress(data)), data, atol=1e-10)
+
+    def test_pca_invalid_window(self):
+        with self.assertRaises(ValueError):
+            PCACompression(window_size=0)
 
 if __name__ == '__main__':
     unittest.main()
